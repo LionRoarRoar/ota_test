@@ -19,8 +19,8 @@ from megengine.data import DataLoader, Infinite, RandomSampler
 from megengine.data import transform as T
 from megengine.optimizer import SGD
 
-from official.vision.detection.tools.data_mapper import data_mapper
-from official.vision.detection.tools.utils import (
+from detection.tools.data_mapper import data_mapper
+from detection.tools.utils import (
     AverageMeter,
     DetectionPadCollator,
     GroupedRandomSampler,
