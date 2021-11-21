@@ -17,7 +17,7 @@ import megengine.module as M
 from megengine import Tensor
 from megengine.module.normalization import GroupNorm
 
-from official.vision.detection import layers
+from detection import layers
 
 
 class PointHead(M.Module):

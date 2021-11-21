@@ -10,7 +10,7 @@ import megengine as mge
 import megengine.functional as F
 import megengine.module as M
 
-from official.vision.detection import layers
+from detection import layers
 
 
 class RCNN(M.Module):

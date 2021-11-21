@@ -15,8 +15,8 @@ import megengine as mge
 import megengine.distributed as dist
 from megengine.data import DataLoader
 
-from official.vision.detection.tools.data_mapper import data_mapper
-from official.vision.detection.tools.utils import DetEvaluator, InferenceSampler, import_from_file
+from detection.tools.data_mapper import data_mapper
+from detection.tools.utils import DetEvaluator, InferenceSampler, import_from_file
 
 logger = mge.get_logger(__name__)
 logger.setLevel("INFO")
