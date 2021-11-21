@@ -8,7 +8,7 @@
 # "AS IS" BASIS, WITHOUT ARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 from megengine import hub
 
-from official.vision.detection import models
+from detection import models
 
 
 @hub.pretrained(
