@@ -11,7 +11,8 @@ import argparse
 import cv2
 
 import megengine as mge
-
+import sys
+sys.path.append('..')
 from detection.tools.data_mapper import data_mapper
 from detection.tools.utils import DetEvaluator, import_from_file
 
@@ -41,10 +42,10 @@ def main():
     model = current_network.Net(cfg)
     model.eval()
 
-    state_dict = mge.load(args.weight_file)
-    if "state_dict" in state_dict:
-        state_dict = state_dict["state_dict"]
-    model.load_state_dict(state_dict)
+    # state_dict = mge.load(args.weight_file)
+    # if "state_dict" in state_dict:
+    #     state_dict = state_dict["state_dict"]
+    # model.load_state_dict(state_dict)
 
     evaluator = DetEvaluator(model)
 

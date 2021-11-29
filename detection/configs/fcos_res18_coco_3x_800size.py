@@ -16,6 +16,8 @@ class CustomFCOSConfig(models.FCOSConfig):
         super().__init__()
 
         self.backbone = "resnet18"
+        # self.max_epoch = 36
+        # self.lr_decay_stages = [24, 32]
         self.fpn_in_channels = [128, 256, 512]
 
 

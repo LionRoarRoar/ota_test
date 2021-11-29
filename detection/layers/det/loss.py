@@ -83,7 +83,7 @@ def smooth_l1_loss(pred: Tensor, target: Tensor, beta: float = 1.0) -> Tensor:
 
 
 def iou_loss(
-    pred: Tensor, target: Tensor, box_mode: str = "xyxy", loss_type: str = "iou", eps: float = 1e-8,
+    pred: Tensor, target: Tensor, box_mode: str = "xyxy", loss_type: str = "iou", eps: float = 1e-8, return_type: str = "",
 ) -> Tensor:
     if box_mode == "ltrb":
         pred = F.concat([-pred[..., :2], pred[..., 2:]], axis=-1)
@@ -123,4 +123,8 @@ def iou_loss(
         ac_union = g_w_intersect * g_h_intersect
         gious = ious - (ac_union - area_union) / F.maximum(ac_union, eps)
         loss = 1 - gious
-    return loss
+
+    if return_type == "ious_iouloss":
+        return ious, loss
+    else:
+        return loss

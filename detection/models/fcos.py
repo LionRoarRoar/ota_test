@@ -12,7 +12,12 @@ import megengine as mge
 import megengine.functional as F
 import megengine.module as M
 
+# import sys
+# print(sys.path)
+# sys.path.append('../models')
 from . import resnet_model as resnet
+#
+# import resnet_model as resnet
 from detection import layers
 
 
@@ -59,12 +64,22 @@ class FCOS(M.Module):
         # ----------------------- build FCOS Head ----------------------- #
         self.head = layers.PointHead(cfg, feature_shapes)
 
+        self.OTA = dict(
+            REG_WEIGHT=1.5,
+            SINKHORN_EPS=0.1,
+            SINKHORN_ITER=50,
+            TOP_CANDIDATES=20,
+        )
+
+        self.sinkhorn = SinkhornDistance(eps=self.OTA["SINKHORN_EPS"],
+                                         max_iter=self.OTA["SINKHORN_ITER"])
+
     def preprocess_image(self, image):
         padded_image = layers.get_padded_tensor(image, 32, 0.0)
         normed_image = (
-            padded_image
-            - np.array(self.cfg.img_mean, dtype="float32")[None, :, None, None]
-        ) / np.array(self.cfg.img_std, dtype="float32")[None, :, None, None]
+                               padded_image
+                               - np.array(self.cfg.img_mean, dtype="float32")[None, :, None, None]
+                       ) / np.array(self.cfg.img_std, dtype="float32")[None, :, None, None]
         return normed_image
 
     def forward(self, image, im_info, gt_boxes=None):
@@ -93,7 +108,7 @@ class FCOS(M.Module):
 
         if self.training:
             gt_labels, gt_offsets, gt_ctrness = self.get_ground_truth(
-                anchors_list, gt_boxes, im_info[:, 4].astype("int32"),
+                anchors_list, gt_boxes, im_info[:, 4].astype("int32"), all_level_box_logits, all_level_box_offsets, all_level_box_ctrness
             )
 
             all_level_box_logits = all_level_box_logits.reshape(-1, self.cfg.num_classes)
@@ -123,13 +138,13 @@ class FCOS(M.Module):
             ).sum() / F.maximum(num_fg, 1)
 
             loss_bbox = (
-                layers.iou_loss(
-                    all_level_box_offsets[fg_mask],
-                    gt_offsets[fg_mask],
-                    box_mode="ltrb",
-                    loss_type=self.cfg.iou_loss_type,
-                ) * gt_ctrness[fg_mask]
-            ).sum() / F.maximum(sum_ctr, 1e-5) * self.cfg.loss_bbox_weight
+                          layers.iou_loss(
+                                all_level_box_offsets[fg_mask],
+                                gt_offsets[fg_mask],
+                                box_mode="ltrb",
+                                loss_type=self.cfg.iou_loss_type,
+                            ) * gt_ctrness[fg_mask]
+                        ).sum() / F.maximum(sum_ctr, 1e-5) * self.cfg.loss_bbox_weight
 
             loss_ctr = layers.binary_cross_entropy(
                 all_level_box_ctrness[fg_mask],
@@ -168,14 +183,18 @@ class FCOS(M.Module):
             )[0]
             return pred_score, clipped_boxes
 
-    def get_ground_truth(self, anchors_list, batched_gt_boxes, batched_num_gts):
+    def get_ground_truth(self, anchors_list, batched_gt_boxes, batched_num_gts,
+                            all_level_box_logits, all_level_box_offsets, all_level_box_ctrness):
         labels_list = []
         offsets_list = []
         ctrness_list = []
-
+        assigned_units = []
         all_level_anchors = F.concat(anchors_list, axis=0)
         for bid in range(batched_gt_boxes.shape[0]):
             gt_boxes = batched_gt_boxes[bid, :batched_num_gts[bid]]
+
+            box_cls_per_image,  box_delta_per_image, box_iou_per_image = \
+                all_level_box_logits[bid], all_level_box_offsets[bid], all_level_box_ctrness[bid]
 
             offsets = self.point_coder.encode(
                 all_level_anchors, F.expand_dims(gt_boxes[:, :4], axis=1)
@@ -190,8 +209,8 @@ class FCOS(M.Module):
             ], axis=0)
             max_offsets = F.max(offsets, axis=2)
             is_cared_in_the_level = (
-                (max_offsets >= F.expand_dims(object_sizes_of_interest[:, 0], axis=0))
-                & (max_offsets <= F.expand_dims(object_sizes_of_interest[:, 1], axis=0))
+                    (max_offsets >= F.expand_dims(object_sizes_of_interest[:, 0], axis=0))
+                    & (max_offsets <= F.expand_dims(object_sizes_of_interest[:, 1], axis=0))
             )
 
             if self.cfg.center_sampling_radius > 0:
@@ -232,15 +251,139 @@ class FCOS(M.Module):
                 * F.maximum(F.min(top_bottom, axis=1) / F.max(top_bottom, axis=1), 0)
             )
 
-            labels_list.append(labels)
-            offsets_list.append(offsets)
-            ctrness_list.append(ctrness)
+            # labels_list.append(labels)
+            # offsets_list.append(offsets)
+            # ctrness_list.append(ctrness)
+
+            # Do OTA
+            num_gt = len(batched_gt_boxes)
+            num_anchor = len(offsets)
+            shape = (num_gt, num_anchor, -1)
+
+            gt_labels = labels.flatten()
+            gt_offsets = offsets.reshape(-1, 4)
+
+            valid_mask = gt_labels >= 0
+            fg_mask = gt_labels > 0
+            num_fg = fg_mask.sum()
+
+            gt_targets = F.zeros_like(all_level_box_logits)
+            gt_targets[fg_mask, gt_labels[fg_mask] - 1] = 1
+
+            loss_cls = layers.sigmoid_focal_loss(
+                box_cls_per_image.unsqueeze(0).expand(shape),
+                gt_targets[valid_mask].expand(shape),
+                alpha=self.cfg.focal_loss_alpha,
+                gamma=self.cfg.focal_loss_gamma,
+            ).sum(axis=-1)
+
+            loss_cls_bg = layers.sigmoid_focal_loss(
+                box_cls_per_image,
+                F.zeros_like(box_cls_per_image),
+                alpha=self.cfg.focal_loss_alpha,
+                gamma=self.cfg.focal_loss_gamma,
+            ).sum(axis=-1)
+
+            ious, loss_delta = layers.iou_loss(
+                box_delta_per_image.unsqueeze(0),
+                gt_offsets[fg_mask],
+                box_mode="ltrb",
+                loss_type=self.cfg.iou_loss_type,
+                return_type="ious_iouloss"
+            )
+
+            loss = loss_cls + self.cfg.loss_bbox_weight * loss_delta + 1e6 * (1 - is_in_boxes.astype(float))
+
+            # Performing Dynamic k Estimation
+            topk_ious, _ = F.topk(ious * is_in_boxes.astype(float), self.OTA['TOP_CANDIDATES'])
+            mu = ious.new_ones(num_gt + 1)
+            mu[:-1] = F.clip(topk_ious.sum(1).int(), lower=1).astype(float)
+            mu[-1] = num_anchor - mu[:-1].sum()
+            nu = ious.new_ones(num_anchor)
+            loss = F.concat([loss, loss_cls_bg.unsqueeze(0)], axis=0)
+
+            # Solving Optimal-Transportation-Plan pi via Sinkhorn-Iteration.
+            _, pi = self.sinkhorn(mu, nu, loss)
+
+            # Rescale pi so that the max pi for each gt equals to 1.
+            rescale_factor, _ = pi.max(axis=1)
+            pi = pi / rescale_factor.unsqueeze(1)
+
+            max_assigned_units, matched_gt_inds = F.max(pi, axis=0)
+            gt_classes_i = labels.new_ones(num_anchor) * self.cfg.num_classes
+            fg_mask = matched_gt_inds != num_gt
+            gt_classes_i[fg_mask] = labels[matched_gt_inds[fg_mask]]
+            labels_list.append(gt_classes_i)
+            assigned_units.append(max_assigned_units)
+
+            box_target_per_image = offsets.new_zeros((num_anchor, 4))
+            box_target_per_image[fg_mask] = \
+                offsets[matched_gt_inds[fg_mask], F.arange(num_anchor)[fg_mask]]
+            offsets_list.append(box_target_per_image)
+
+            gt_ious_per_image = ious.new_zeros((num_anchor, 1))
+            gt_ious_per_image[fg_mask] = ious[matched_gt_inds[fg_mask],
+                                              F.arange(num_anchor)[fg_mask]].unsqueeze(1)
+            ctrness_list.append(gt_ious_per_image)
 
         return (
             F.stack(labels_list, axis=0).detach(),
             F.stack(offsets_list, axis=0).detach(),
             F.stack(ctrness_list, axis=0).detach(),
         )
+
+
+class SinkhornDistance(M.Module):
+    r"""
+        Given two empirical measures each with :math:`P_1` locations
+        :math:`x\in\mathbb{R}^{D_1}` and :math:`P_2` locations :math:`y\in\mathbb{R}^{D_2}`,
+        outputs an approximation of the regularized OT cost for point clouds.
+        Args:
+        eps (float): regularization coefficient
+        max_iter (int): maximum number of Sinkhorn iterations
+        reduction (string, optional): Specifies the reduction to apply to the output:
+        'none' | 'mean' | 'sum'. 'none': no reduction will be applied,
+        'mean': the sum of the output will be divided by the number of
+        elements in the output, 'sum': the output will be summed. Default: 'none'
+        Shape:
+            - Input: :math:`(N, P_1, D_1)`, :math:`(N, P_2, D_2)`
+            - Output: :math:`(N)` or :math:`()`, depending on `reduction`
+    """
+
+    def __init__(self, eps=1e-3, max_iter=100, reduction='none'):
+        super(SinkhornDistance, self).__init__()
+        self.eps = eps
+        self.max_iter = max_iter
+        self.reduction = reduction
+
+    def forward(self, mu, nu, C):
+        u = F.ones_like(mu)
+        v = F.ones_like(nu)
+
+        # Sinkhorn iterations
+        for i in range(self.max_iter):
+            v = self.eps * \
+                (F.log(
+                    nu + 1e-8) - F.logsumexp(self.M(C, u, v).transpose(-2, -1), axis=-1)) + v
+            u = self.eps * \
+                (F.log(
+                    mu + 1e-8) - F.logsumexp(self.M(C, u, v), axis=-1)) + u
+
+        U, V = u, v
+        # Transport plan pi = diag(a)*K*diag(b)
+        pi = F.exp(
+            self.M(C, U, V)).detach()
+        # Sinkhorn distance
+        cost = F.sum(
+            pi * C, axis=(-2, -1))
+        return cost, pi
+
+    def M(self, C, u, v):
+        '''
+        "Modified cost for logarithmic updates"
+        "$M_{ij} = (-c_{ij} + u_i + v_j) / epsilon$"
+        '''
+        return (-C + u.unsqueeze(-1) + v.unsqueeze(-2)) / self.eps
 
 
 class FCOSConfig:
@@ -317,3 +460,11 @@ class FCOSConfig:
         self.test_vis_threshold = 0.3
         self.test_cls_threshold = 0.05
         self.test_nms = 0.6
+
+
+
+# from detection.tools.utils import  import_from_file
+# current_network = import_from_file('../configs/fcos_res18_coco_3x_800size.py')
+# cfg = current_network.Cfg()
+# cfg.backbone_pretrained = False
+# model = current_network.Net(cfg)
